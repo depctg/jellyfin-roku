@@ -1,15 +1,22 @@
 sub init()
+    m.top.functionName = "parseCaption"
+
     m.top.observeField("url", "fetchCaption")
     m.top.currentCaption = []
+    m.nextCaption = invalid
     m.top.currentPos = 0
 
     m.captionTimer = m.top.findNode("captionTimer")
     m.captionTimer.ObserveField("fire", "updateCaption")
 
-    m.captionList = []
+    m.captionList = CreateObject("roSGNode", "ContentNode")
+    m.captionList.addFields({
+        list: [],
+        size: -1,
+        tags: CreateObject("roRegex", "{\\an\d*}|&lt;.*?&gt;|<.*?>", "s")
+    })
     m.reader = createObject("roUrlTransfer")
     m.font = CreateObject("roSGNode", "Font")
-    m.tags = CreateObject("roRegex", "{\\an\d*}|&lt;.*?&gt;|<.*?>", "s")
 
     ' Caption Style
     m.fontSizeDict = { "Default": 60, "Large": 60, "Extra Large": 70, "Medium": 50, "Small": 40 }
@@ -38,19 +45,29 @@ sub setFont()
     end if
 end sub
 
+sub parseCaption()
+    list = []
+    if m.subtype = "vtt"
+        list = parseVTT(m.text)
+    else if m.subtype = "ass"
+        list = parseASS(m.text)
+    end if
+    list.sortBy("start")
+    m.captionList.list = list
+end sub
+
 sub fetchCaption()
     m.captionTimer.control = "stop"
     re = CreateObject("roRegex", "(http.*?\.(vtt|ass))", "s")
     url = re.match(m.top.url)
     if url[0] <> invalid
         m.reader.setUrl(url[0])
-        text = m.reader.GetToString()
-        subtype = url[2]
-        if subtype = "vtt"
-            m.captionList = parseVTT(text)
-        else if subtype = "ass"
-            m.captionList = parseASS(text)
-        end if
+        m.text = m.reader.GetToString()
+        m.subtype = url[2]
+
+        m.top.control = "RUN"
+
+        ' Clear the position
         m.captionTimer.control = "start"
     else
         m.captionTimer.control = "stop"
@@ -93,25 +110,38 @@ function newRect(lg)
     return rectLG
 end function
 
+function captionFor(curPos)
+    texts = []
+    for each entry in m.captionList.list
+        if entry["start"] <= curPos
+            if curPos <= entry["end"]
+                t = entry["text"]
+                texts.push(t)
+            end if
+        else
+            exit for
+        end if
+    end for
+    return texts
+end function
 
 sub updateCaption ()
     m.top.currentCaption = []
     if LCase(m.top.playerState) = "playingon"
         m.top.currentPos = m.top.currentPos + 100
-        texts = []
-        for each entry in m.captionList
-            if entry["start"] <= m.top.currentPos and m.top.currentPos < entry["end"]
-                t = m.tags.replaceAll(entry["text"], "")
-                texts.push(t)
-            end if
-        end for
+        if m.nextCaption = invalid
+            m.nextCaption = captionFor(m.top.currentPos)
+        end if
+
         labels = []
-        for each text in texts
+        for each text in m.nextCaption
             labels.push(newlabel (text))
         end for
         lines = newLayoutGroup(labels)
         rect = newRect(lines)
         m.top.currentCaption = [rect, lines]
+
+        m.nextCaption = captionFor(m.top.currentPos + 100)
     else if LCase(m.top.playerState.right(1)) = "w"
         m.top.playerState = m.top.playerState.left(len (m.top.playerState) - 1)
     end if
@@ -156,27 +186,65 @@ function trimASSText(text)
     ' filter out style override
     ' TODO: honor the style and style override
     ' TODO: inline comments
-    re = CreateObject("roRegex", "\{(?:[^}{]+|(?R))*+\}", "s")
-    text = re.ReplaceAll(text, "")
+    ' TODO: drawing command
+    text = m.assControlSequence.ReplaceAll(text, "")
+    text = text.split("\N")
     return text
 end function
 
 function parseASS(lines)
+    m.assControlSequence = CreateObject("roRegex", "\{(?:[^}{]+|(?R))*+\}", "s")
     lines = lines.split(chr(10))
-
-    reFormat = CreateObject("roRegex", "Format: (.*)", "s")
-    reLine = CreateObject("roRegex", "Dialogue: (.*)", "s")
 
     startIndex = -1
     endIndex = -1
     textIndex = -1
 
     entries = []
+    historyText = invalid
+    historyStart = 0
+    historyEnd = 0
 
     for i = 0 to lines.count() - 1
-        format = reFormat.match(lines[i])[1]
-        if format <> invalid
-            format = format.tokenize(",")
+        line = lines[i].trim()
+        if startIndex <> -1
+            ' Dialogue:
+            if line.left(9) = "Dialogue:"
+                dialoge = line.mid(9).split(",")
+                msStart = toMs(dialoge[startIndex].trim())
+                msEnd = toMs(dialoge[endIndex].trim())
+                if msStart >= msEnd
+                    continue for
+                end if
+
+                text = []
+                for j = textIndex to dialoge.count() - 1
+                    text.push(dialoge[j])
+                end for
+                trimmed = trimASSText(text.join(","))
+
+                for each t in trimmed
+                    t = t.trim()
+                    if t <> ""
+                        ' filter based on this history
+                        if historyText = t and msStart <= historyEnd
+                            ' TODO: if?
+                            historyEnd = msEnd
+                        else 'emit
+                            if historyText <> invalid
+                                entry = { "start": historyStart, "end": historyEnd, "text": historyText }
+                                entries.push(entry)
+                            end if
+                            historyText = t
+                            historyStart = msStart
+                            historyEnd = msEnd
+                        end if
+                    end if
+                end for
+            end if
+        else if line.left(7) = "Format:"
+            ' Format
+            format = line.mid(7).tokenize(",")
             for j = 0 to format.count() - 1
                 f = format[j].trim()
                 if f = "Start"
@@ -189,24 +257,13 @@ function parseASS(lines)
                 end if
             end for
         end if
-
-        if startIndex <> -1
-            dialoge = reLine.match(lines[i])[1]
-            if dialoge <> invalid
-                dialoge = dialoge.split(",")
-                msStart = toMs(dialoge[startIndex].trim())
-                msEnd = toMs(dialoge[endIndex].trim())
-                text = []
-                for j = textIndex to dialoge.count() - 1
-                    text.push(dialoge[j])
-                end for
-                trimmed = trimASSText(text.join(","))
-
-                entry = { "start": msStart, "end": msEnd, "text": trimmed }
-                entries.push(entry)
-            end if
-        end if
     end for
+
+    'emit last
+    if historyText <> invalid
+        entry = { "start": historyStart, "end": historyEnd, "text": historyText }
+        entries.push(entry)
+    end if
 
     return entries
 end function

@@ -36,6 +36,9 @@ sub init()
     end if
 
     setClockVisibility()
+
+    updateFont(m.top.findNode("overlayTitle"))
+
 end sub
 
 sub onVisibleChange()

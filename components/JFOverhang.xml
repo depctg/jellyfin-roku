@@ -42,4 +42,5 @@
   </interface>
   <script type="text/brightscript" uri="JFOverhang.brs" />
   <script type="text/brightscript" uri="pkg:/source/utils/config.brs" />
+  <script type="text/brightscript" uri="pkg:/source/utils/misc.brs" />
 </component>

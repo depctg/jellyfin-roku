@@ -13,6 +13,8 @@ sub init()
     m.playedIndicator = m.top.findNode("playedIndicator")
     m.checkmark = m.top.findNode("checkmark")
     m.checkmark.font.size = 35
+
+    updateFont(m.top)
 end sub
 
 sub itemContentChanged()
